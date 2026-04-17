@@ -1,0 +1,179 @@
+"""
+main.py — FastAPI Backend (FIXED)
+"""
+
+import os, uuid
+from datetime import datetime
+from typing import Optional
+
+import joblib
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+# ── Load ENV ──────────────────────────────────────────
+LOGSTASH_URL = os.getenv("LOGSTASH_URL", "http://localhost:5000")
+
+# ── Optional integrations ─────────────────────────────
+import requests as _req
+
+try:
+    from pymongo import MongoClient
+    _client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017/"), serverSelectionTimeoutMS=2000)
+    _client.server_info()
+    db = _client["upi_fraud"]
+    txn_col = db["transactions"]
+    MONGO_OK = True
+    print("✅ MongoDB connected")
+except Exception:
+    MONGO_OK = False
+    _mem_store = []
+    print("⚠️ MongoDB not available — using memory")
+
+# ── Load models ───────────────────────────────────────
+MODEL_DIR = "models"
+try:
+    rf = joblib.load(f"{MODEL_DIR}/random_forest.pkl")
+    le_location = joblib.load(f"{MODEL_DIR}/le_location.pkl")
+    le_device = joblib.load(f"{MODEL_DIR}/le_device.pkl")
+    feature_cols = joblib.load(f"{MODEL_DIR}/feature_cols.pkl")
+    MODELS_OK = True
+    print("✅ Models loaded")
+except Exception as e:
+    MODELS_OK = False
+    print("❌ Model error:", e)
+
+# ── Risk engine ───────────────────────────────────────
+from risk_engine import compute_risk_score
+
+# ── FastAPI ───────────────────────────────────────────
+app = FastAPI(title="UPI FraudShield API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Static UI ─────────────────────────────────────────
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+def home():
+    if os.path.exists("static/dashboard.html"):
+        return FileResponse("static/dashboard.html")
+    return {"message": "API running"}
+
+# ══════════════════════════════════════════════════════
+# SCHEMA
+# ══════════════════════════════════════════════════════
+class TransactionIn(BaseModel):
+    sender_upi: str
+    receiver_upi: str
+    amount: float
+    payment_type: str = "P2P"
+    hour_of_day: int = 14
+    day_of_week: int = 1
+    device_type: str
+    location: str
+    is_new_receiver: int = 0
+    txn_frequency_1hr: int = 2
+    failed_pin_attempts: int = 0
+    vpn_used: int = 0
+
+# ══════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════
+def _safe_encode(enc, val):
+    try:
+        return int(enc.transform([val])[0])
+    except:
+        return 0
+
+def _features(txn):
+    return np.array([[
+        txn.amount,
+        txn.hour_of_day,
+        txn.day_of_week,
+        txn.is_new_receiver,
+        txn.txn_frequency_1hr,
+        txn.failed_pin_attempts,
+        txn.vpn_used,
+        _safe_encode(le_location, txn.location),
+        _safe_encode(le_device, txn.device_type),
+        int(txn.hour_of_day < 6 or txn.hour_of_day > 22),
+        int(txn.amount > 50000),
+        int(txn.txn_frequency_1hr > 10),
+        int("unknown" in txn.device_type.lower()),
+        int("vpn" in txn.location.lower())
+    ]])
+
+def _post_to_logstash(event):
+    try:
+        print("➡ Sending to Logstash:", LOGSTASH_URL)
+        _req.post(LOGSTASH_URL, json=event, timeout=2)
+    except Exception as e:
+        print("❌ Logstash error:", e)
+
+def _save(record):
+    if MONGO_OK:
+        txn_col.insert_one(record)
+    else:
+        _mem_store.append(record)
+
+def _get(limit):
+    if MONGO_OK:
+        return list(txn_col.find({}, {"_id": 0}).limit(limit))
+    return _mem_store[-limit:]
+
+# ══════════════════════════════════════════════════════
+# API
+# ══════════════════════════════════════════════════════
+@app.post("/predict")
+def predict(txn: TransactionIn):
+
+    if not MODELS_OK:
+        raise HTTPException(500, "Model not loaded")
+
+    txn_id = "TXN" + uuid.uuid4().hex[:8]
+    timestamp = datetime.utcnow().isoformat()
+
+    X = _features(txn)
+    prob = float(rf.predict_proba(X)[0][1])
+
+    risk = compute_risk_score(prob, txn.dict())
+
+    event = {
+        "transaction_id": txn_id,
+        "@timestamp": timestamp,
+        "amount": txn.amount,
+        "risk_score": risk["risk_score"],
+        "risk_level": risk["risk_level"]
+    }
+
+    _post_to_logstash(event)
+
+    _save({**event, **txn.dict()})
+
+    return {
+        "txn_id": txn_id,
+        "fraud_probability": prob,
+        "risk_score": risk["risk_score"],
+        "risk_level": risk["risk_level"]
+    }
+
+@app.get("/transactions")
+def transactions():
+    return _get(50)
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "logstash": LOGSTASH_URL
+    }

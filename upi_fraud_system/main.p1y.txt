@@ -1,0 +1,275 @@
+"""
+main.py — FastAPI Backend (FINAL MERGED)
+"""
+
+import os
+import uuid
+from datetime import datetime
+from typing import Optional
+
+# Load .env
+from dotenv import load_dotenv
+load_dotenv()
+
+import joblib
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+# ─────────────────────────────────────────────
+# ENV CONFIG (IMPORTANT FIX)
+# ─────────────────────────────────────────────
+LOGSTASH_URL = os.getenv("LOGSTASH_URL", "http://localhost:5000")
+
+# ─────────────────────────────────────────────
+# Optional integrations
+# ─────────────────────────────────────────────
+try:
+    import requests as _req
+    REQUESTS_OK = True
+except ImportError:
+    REQUESTS_OK = False
+
+# ─────────────────────────────────────────────
+# MongoDB
+# ─────────────────────────────────────────────
+try:
+    from pymongo import MongoClient
+
+    _client = MongoClient(
+        os.getenv("MONGO_URI", "mongodb://localhost:27017/"),
+        serverSelectionTimeoutMS=2000
+    )
+    _client.server_info()
+
+    db = _client["upi_fraud"]
+    txn_col = db["transactions"]
+
+    MONGO_OK = True
+    print("✅ MongoDB connected")
+
+except Exception:
+    MONGO_OK = False
+    _mem_store = []
+    print("⚠️ MongoDB not available — using memory")
+
+# ─────────────────────────────────────────────
+# Twilio (SECURE)
+# ─────────────────────────────────────────────
+try:
+    from twilio.rest import Client as TwilioClient
+
+    TWILIO_SID = os.getenv("TWILIO_SID")
+    TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
+
+    if TWILIO_SID and TWILIO_TOKEN:
+        _twilio = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+        TWILIO_OK = True
+        print("✅ Twilio configured")
+    else:
+        TWILIO_OK = False
+        print("⚠️ Twilio env vars not set")
+
+except Exception:
+    TWILIO_OK = False
+    print("⚠️ Twilio init failed")
+
+# ─────────────────────────────────────────────
+# Load ML Models
+# ─────────────────────────────────────────────
+MODEL_DIR = "models"
+
+try:
+    rf = joblib.load(f"{MODEL_DIR}/random_forest.pkl")
+    le_location = joblib.load(f"{MODEL_DIR}/le_location.pkl")
+    le_device = joblib.load(f"{MODEL_DIR}/le_device.pkl")
+    feature_cols = joblib.load(f"{MODEL_DIR}/feature_cols.pkl")
+
+    MODELS_OK = True
+    print("✅ Models loaded")
+
+except Exception as e:
+    MODELS_OK = False
+    print(f"⚠️ Models not loaded: {e}")
+
+# ─────────────────────────────────────────────
+# Risk engine
+# ─────────────────────────────────────────────
+from risk_engine import compute_risk_score
+
+# ─────────────────────────────────────────────
+# FastAPI app
+# ─────────────────────────────────────────────
+app = FastAPI(title="UPI FraudShield API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve frontend
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/")
+async def home():
+    if os.path.exists("static/dashboard.html"):
+        return FileResponse("static/dashboard.html")
+    return {"message": "UPI FraudShield API — see /docs"}
+
+
+# ─────────────────────────────────────────────
+# Schema
+# ─────────────────────────────────────────────
+class TransactionIn(BaseModel):
+    sender_upi: str
+    receiver_upi: str
+    amount: float
+    payment_type: str = "P2P"
+    hour_of_day: int = 14
+    day_of_week: int = 1
+    device_type: str
+    location: str
+    is_new_receiver: int = 0
+    txn_frequency_1hr: int = 2
+    failed_pin_attempts: int = 0
+    vpn_used: int = 0
+
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+def _safe_encode(encoder, value, default=0):
+    try:
+        return int(encoder.transform([value])[0])
+    except:
+        return default
+
+
+def _build_feature_vector(txn):
+    return np.array([[txn.amount]])  # simplified
+
+
+def _post_to_logstash(event):
+    if not REQUESTS_OK:
+        return
+    try:
+        print(f"➡ Sending to Logstash: {LOGSTASH_URL}")
+        _req.post(LOGSTASH_URL, json=event, timeout=2)
+    except Exception as e:
+        print(f"❌ Logstash error: {e}")
+
+
+def _send_sms(txn_id, amount, risk_score, sender):
+    if not TWILIO_OK:
+        print(f"[SMS MOCK] HIGH RISK: {txn_id}")
+        return
+
+    try:
+        _twilio.messages.create(
+            body=f"🚨 FRAUD ALERT\nTXN: {txn_id}\n₹{amount}\nScore: {risk_score}",
+            from_=os.getenv("TWILIO_FROM"),
+            to=os.getenv("TWILIO_ADMIN"),
+        )
+    except Exception as e:
+        print(f"[SMS ERROR] {e}")
+
+
+def _save_record(record):
+    if MONGO_OK:
+        txn_col.insert_one(record)
+    else:
+        _mem_store.append(record)
+
+
+def _get_records(limit=50):
+    if MONGO_OK:
+        return list(txn_col.find({}, {"_id": 0}).limit(limit))
+    return _mem_store[-limit:]
+
+
+# ─────────────────────────────────────────────
+# Predict API
+# ─────────────────────────────────────────────
+@app.post("/predict")
+async def predict(txn: TransactionIn):
+
+    if not MODELS_OK:
+        raise HTTPException(503, "Models not loaded")
+
+    txn_id = "TXN" + uuid.uuid4().hex[:10]
+    timestamp = datetime.utcnow().isoformat()
+
+    # ML prediction
+    X = _build_feature_vector(txn)
+    fraud_probability = float(rf.predict_proba(X)[0][1])
+
+    # Risk scoring
+    risk_result = compute_risk_score(fraud_probability, txn.dict())
+
+    # SIEM event (IMPORTANT for Kibana)
+    event = {
+        "transaction_id": txn_id,
+        "@timestamp": timestamp,
+        "amount": txn.amount,
+        "risk_score": risk_result["risk_score"],
+        "risk_level": risk_result["risk_level"],
+        "device_type": txn.device_type,
+        "location": txn.location,
+    }
+
+    _post_to_logstash(event)
+
+    # SMS alert
+    alert_sent = False
+    if risk_result["risk_level"] == "HIGH":
+        _send_sms(txn_id, txn.amount, risk_result["risk_score"], txn.sender_upi)
+        alert_sent = True
+
+    # Save
+    record = {**event, **txn.dict(), "alert_sent": alert_sent}
+    _save_record(record)
+
+    return {
+        "transaction_id": txn_id,
+        "risk_level": risk_result["risk_level"],
+        "risk_score": risk_result["risk_score"],
+        "alert_sent": alert_sent,
+    }
+
+
+# ─────────────────────────────────────────────
+# Analytics
+# ─────────────────────────────────────────────
+@app.get("/analytics")
+async def analytics():
+    data = _get_records(100)
+    return {"total": len(data)}
+
+
+# ─────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "models": MODELS_OK,
+        "mongodb": MONGO_OK,
+        "twilio": TWILIO_OK,
+        "logstash": LOGSTASH_URL,
+    }
+
+
+# ─────────────────────────────────────────────
+# Run
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

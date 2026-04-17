@@ -1,0 +1,158 @@
+import os, uuid, logging
+from datetime import datetime
+from typing import Optional
+
+# ✅ NEW: load .env file
+from dotenv import load_dotenv
+load_dotenv()
+
+import joblib
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+# ── Optional integrations ─────────
+try:
+    import requests as _req
+    REQUESTS_OK = True
+except ImportError:
+    REQUESTS_OK = False
+
+# ── MongoDB ─────────
+try:
+    from pymongo import MongoClient
+    _client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=2000)
+    _client.server_info()
+    db         = _client["upi_fraud"]
+    txn_col    = db["transactions"]
+    MONGO_OK   = True
+    print("✅ MongoDB connected")
+except Exception:
+    MONGO_OK   = False
+    _mem_store = []
+    print("⚠️ MongoDB not available — using in-memory store")
+
+# ── Twilio (FIXED) ─────────
+try:
+    from twilio.rest import Client as TwilioClient
+
+    TWILIO_SID   = os.getenv("TWILIO_SID")
+    TWILIO_TOKEN = os.getenv("TWILIO_TOKEN")
+
+    if TWILIO_SID and TWILIO_TOKEN:
+        _twilio = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+        TWILIO_OK = True
+        print("✅ Twilio configured")
+    else:
+        TWILIO_OK = False
+        print("⚠️ Twilio env vars not set")
+
+except Exception:
+    TWILIO_OK = False
+    print("⚠️ Twilio initialization failed")
+
+# ── Load models ─────────
+MODEL_DIR = "models"
+try:
+    rf           = joblib.load(f"{MODEL_DIR}/random_forest.pkl")
+    le_location  = joblib.load(f"{MODEL_DIR}/le_location.pkl")
+    le_device    = joblib.load(f"{MODEL_DIR}/le_device.pkl")
+    feature_cols = joblib.load(f"{MODEL_DIR}/feature_cols.pkl")
+    MODELS_OK    = True
+    print("✅ Models loaded")
+except Exception as e:
+    MODELS_OK    = False
+    print(f"⚠️ Models not found ({e})")
+
+from risk_engine import compute_risk_score
+
+# ── FastAPI ─────────
+app = FastAPI(title="UPI FraudShield API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+)
+
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def serve_dashboard():
+    if os.path.exists("static/dashboard.html"):
+        return FileResponse("static/dashboard.html")
+    return {"message": "UPI FraudShield API — see /docs"}
+
+# ── Schema ─────────
+class TransactionIn(BaseModel):
+    sender_upi          : str
+    receiver_upi        : str
+    amount              : float
+    payment_type        : str = "P2P"
+    hour_of_day         : int = 14
+    day_of_week         : int = 1
+    device_type         : str
+    location            : str
+    is_new_receiver     : int = 0
+    txn_frequency_1hr   : int = 2
+    failed_pin_attempts : int = 0
+    vpn_used            : int = 0
+
+# ── Helpers ─────────
+def _safe_encode(encoder, value: str, default=0):
+    try:
+        return int(encoder.transform([value])[0])
+    except:
+        return default
+
+def _build_feature_vector(txn):
+    return np.array([[txn.amount]])
+
+def _send_sms(txn_id, amount, risk_score, sender):
+    if not TWILIO_OK:
+        print(f"[SMS MOCK] {txn_id}")
+        return
+
+    try:
+        _twilio.messages.create(
+            body=f"🚨 FRAUD ALERT\nTXN: {txn_id}\n₹{amount}\nScore: {risk_score}",
+            from_=os.getenv("TWILIO_FROM"),
+            to=os.getenv("TWILIO_ADMIN"),
+        )
+    except Exception as e:
+        print(f"[SMS ERROR] {e}")
+
+# ── API ─────────
+@app.post("/predict")
+async def predict(txn: TransactionIn):
+
+    if not MODELS_OK:
+        raise HTTPException(503, "Model not loaded")
+
+    txn_id = "TXN" + uuid.uuid4().hex[:8]
+
+    fraud_probability = 0.9  # mock
+
+    risk_result = compute_risk_score(fraud_probability, txn.dict())
+
+    if risk_result["risk_level"] == "HIGH":
+        _send_sms(txn_id, txn.amount, risk_result["risk_score"], txn.sender_upi)
+
+    return {
+        "transaction_id": txn_id,
+        "risk_level": risk_result["risk_level"]
+    }
+
+@app.get("/health")
+async def health():
+    return {
+        "twilio": TWILIO_OK
+    }
+
+# ── Run ─────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", reload=True)

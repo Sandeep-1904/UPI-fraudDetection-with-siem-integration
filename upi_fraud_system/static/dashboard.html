@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>FraudGaurd — Analytics Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#050810;--bg2:#0b0f1a;--surface:#111827;
+  --border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.13);
+  --accent:#00e5ff;--white:#e2e8f4;--muted:#7a8ba8;
+  --high:#ff3d5a;--med:#ffd23f;--low:#3de8a0;--purple:#7c3aed;
+  --font-mono:'Courier New',monospace;
+}
+body{background:var(--bg);color:var(--white);font-family:'Segoe UI',sans-serif;min-height:100vh}
+.grid-bg{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background-image:linear-gradient(rgba(0,229,255,.02) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(0,229,255,.02) 1px,transparent 1px);
+  background-size:40px 40px}
+
+/* HEADER */
+header{position:sticky;top:0;z-index:100;display:flex;align-items:center;
+  gap:20px;padding:0 28px;height:56px;
+  background:rgba(5,8,16,.95);border-bottom:1px solid var(--border2)}
+.logo{font-size:18px;font-weight:700;letter-spacing:.06em}
+.logo span{color:var(--accent)}
+.status{margin-left:auto;display:flex;align-items:center;gap:8px;
+  font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--low);
+  animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+/* MAIN */
+main{position:relative;z-index:1;padding:24px 28px;max-width:1400px;margin:0 auto}
+
+/* STAT CARDS */
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+@media(max-width:900px){.cards{grid-template-columns:1fr 1fr}}
+.card{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:20px 22px;position:relative;overflow:hidden}
+.card::after{content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:.25}
+.card-label{font-size:11px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.1em;margin-bottom:10px;font-family:var(--font-mono)}
+.card-value{font-size:38px;font-weight:700;font-family:var(--font-mono);line-height:1}
+.card-value.accent{color:var(--accent)}
+.card-value.high{color:var(--high)}
+.card-value.med{color:var(--med)}
+.card-value.low{color:var(--low)}
+
+/* CHARTS ROW */
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
+@media(max-width:900px){.charts{grid-template-columns:1fr}}
+.chart-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:20px}
+.chart-card.wide{grid-column:1/-1}
+.chart-title{font-size:13px;font-weight:600;color:var(--white);margin-bottom:16px;
+  letter-spacing:.04em}
+
+/* TRANSACTION TABLE */
+.table-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:20px}
+.table-header{display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:14px}
+.table-title{font-size:13px;font-weight:600}
+.refresh-btn{background:none;border:1px solid var(--border2);color:var(--muted);
+  font-family:var(--font-mono);font-size:10px;padding:5px 12px;border-radius:4px;
+  cursor:pointer;transition:all .2s}
+.refresh-btn:hover{color:var(--accent);border-color:var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{font-family:var(--font-mono);font-size:10px;color:var(--muted);
+  text-align:left;padding:8px 10px;border-bottom:1px solid var(--border2);
+  text-transform:uppercase;letter-spacing:.08em}
+td{padding:10px;border-bottom:1px solid var(--border);color:var(--white);
+  font-family:var(--font-mono);font-size:11px}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.02)}
+.badge{display:inline-block;padding:2px 9px;border-radius:4px;
+  font-weight:700;font-size:10px;letter-spacing:.06em}
+.badge.HIGH{background:rgba(255,61,90,.15);color:var(--high);border:1px solid rgba(255,61,90,.3)}
+.badge.MEDIUM{background:rgba(255,210,63,.12);color:var(--med);border:1px solid rgba(255,210,63,.3)}
+.badge.LOW{background:rgba(61,232,160,.12);color:var(--low);border:1px solid rgba(61,232,160,.3)}
+
+/* PREDICT FORM */
+.form-card{background:var(--surface);border:1px solid var(--border);
+  border-radius:12px;padding:22px;margin-bottom:24px}
+.form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:900px){.form-grid{grid-template-columns:1fr 1fr}}
+.field label{display:block;font-family:var(--font-mono);font-size:10px;
+  color:var(--muted);letter-spacing:.1em;margin-bottom:5px;text-transform:uppercase}
+.field input,.field select{width:100%;background:var(--bg2);
+  border:1px solid var(--border2);color:var(--white);
+  font-family:var(--font-mono);font-size:12px;padding:8px 10px;
+  border-radius:6px;outline:none;transition:border-color .2s}
+.field input:focus,.field select:focus{border-color:var(--accent)}
+.field select option{background:var(--bg2)}
+.submit-btn{grid-column:1/-1;padding:12px;background:var(--accent);
+  color:#000;font-family:var(--font-mono);font-size:12px;font-weight:700;
+  letter-spacing:.1em;border:none;border-radius:6px;cursor:pointer;
+  text-transform:uppercase;transition:all .2s;margin-top:4px}
+.submit-btn:hover{background:#00f5ff;box-shadow:0 0 16px rgba(0,229,255,.35)}
+.result-box{margin-top:14px;padding:14px;background:var(--bg2);
+  border:1px solid var(--border2);border-radius:8px;display:none;
+  font-family:var(--font-mono);font-size:12px;line-height:1.8}
+.result-box.show{display:block}
+.r-key{color:var(--muted)}
+.r-val{color:var(--white)}
+.r-val.high{color:var(--high);font-weight:700}
+.r-val.med{color:var(--med);font-weight:700}
+.r-val.low{color:var(--low);font-weight:700}
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+
+<header>
+  <div class="logo">FRAUD<span>GAURD</span></div>
+  <div style="color:var(--muted);font-size:12px">UPI Analytics Dashboard</div>
+  <div class="status">
+    <span class="dot"></span>
+    <span id="api-status">Connecting...</span>
+    <span style="margin-left:12px;color:var(--muted)" id="clock"></span>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── STAT CARDS ── -->
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Total Transactions</div>
+      <div class="card-value accent" id="c-total">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">High Risk</div>
+      <div class="card-value high" id="c-high">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Medium Risk</div>
+      <div class="card-value med" id="c-medium">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Avg Risk Score</div>
+      <div class="card-value" id="c-avg">—</div>
+    </div>
+  </div>
+
+  <!-- ── PREDICT FORM ── -->
+  <div class="form-card">
+    <div class="chart-title" style="margin-bottom:14px">Analyse a Transaction</div>
+    <div class="form-grid">
+      <div class="field">
+        <label>Sender UPI</label>
+        <input id="f-sender" type="text" value="rahul@okaxis"/>
+      </div>
+      <div class="field">
+        <label>Receiver UPI</label>
+        <input id="f-receiver" type="text" value="shop@ybl"/>
+      </div>
+      <div class="field">
+        <label>Amount (₹)</label>
+        <input id="f-amount" type="number" value="5000"/>
+      </div>
+      <div class="field">
+        <label>Hour of Day</label>
+        <input id="f-hour" type="number" min="0" max="23" value="14"/>
+      </div>
+      <div class="field">
+        <label>Device Type</label>
+        <select id="f-device">
+          <option>iPhone_14</option><option>Samsung_Galaxy_S23</option>
+          <option>OnePlus_11</option><option>Emulator</option>
+          <option>Unknown_Device</option><option>Rooted_Android</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Location</label>
+        <select id="f-location">
+          <option>Mumbai</option><option>Delhi</option><option>Bangalore</option>
+          <option>Unknown_IP</option><option>Foreign_IP</option><option>Spoofed_Location</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Txn Frequency / hr</label>
+        <input id="f-freq" type="number" value="2"/>
+      </div>
+      <div class="field">
+        <label>New Receiver</label>
+        <select id="f-new"><option value="0">No</option><option value="1">Yes</option></select>
+      </div>
+      <button class="submit-btn" onclick="predict()">Analyse Transaction →</button>
+    </div>
+    <div class="result-box" id="result-box"></div>
+  </div>
+
+  <!-- ── CHARTS ── -->
+  <div class="charts">
+    <div class="chart-card">
+      <div class="chart-title">Risk Level Distribution</div>
+      <canvas id="chart-donut" height="220"></canvas>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Risk Score Trend (last 20 transactions)</div>
+      <canvas id="chart-line" height="220"></canvas>
+    </div>
+  </div>
+
+  <!-- ── TABLE ── -->
+  <div class="table-card">
+    <div class="table-header">
+      <div class="table-title">Recent HIGH Risk Transactions</div>
+      <button class="refresh-btn" onclick="loadAll()">Refresh</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>TXN ID</th><th>Sender</th><th>Amount</th>
+          <th>Device</th><th>Location</th><th>Score</th>
+          <th>Level</th><th>Time</th>
+        </tr>
+      </thead>
+      <tbody id="txn-table-body">
+        <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">
+          Loading...
+        </td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<script>
+const API = window.location.origin;
+let donutChart, lineChart;
+
+// Clock
+setInterval(() => {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-IN', {hour12:false});
+}, 1000);
+
+// ── Init charts ─────────────────────────────────────
+function initCharts() {
+  const dc = document.getElementById('chart-donut').getContext('2d');
+  donutChart = new Chart(dc, {
+    type: 'doughnut',
+    data: { labels:['HIGH','MEDIUM','LOW'],
+      datasets:[{ data:[0,0,0],
+        backgroundColor:['#ff3d5a','#ffd23f','#3de8a0'],
+        borderColor:'#111827', borderWidth:3 }] },
+    options: { plugins:{ legend:{ labels:{ color:'#7a8ba8', font:{size:12} } } },
+               cutout:'65%' }
+  });
+
+  const lc = document.getElementById('chart-line').getContext('2d');
+  lineChart = new Chart(lc, {
+    type: 'line',
+    data: { labels:[], datasets:[{
+      label:'Risk Score', data:[],
+      borderColor:'#00e5ff', backgroundColor:'rgba(0,229,255,.08)',
+      pointBackgroundColor:'#00e5ff', tension:.4, fill:true }] },
+    options: {
+      scales:{
+        x:{ ticks:{ color:'#3d4d65', maxTicksLimit:8 }, grid:{ color:'rgba(255,255,255,.04)' } },
+        y:{ min:0, max:100, ticks:{ color:'#3d4d65' }, grid:{ color:'rgba(255,255,255,.04)' } }
+      },
+      plugins:{ legend:{ labels:{ color:'#7a8ba8' } } }
+    }
+  });
+}
+
+// ── Load analytics ──────────────────────────────────
+async function loadAnalytics() {
+  try {
+    const r = await fetch(`${API}/analytics`);
+    if (!r.ok) throw new Error();
+    const d = await r.json();
+    document.getElementById('c-total').textContent  = d.total  || 0;
+    document.getElementById('c-high').textContent   = d.high   || 0;
+    document.getElementById('c-medium').textContent = d.medium || 0;
+    document.getElementById('c-avg').textContent    = d.avg_risk_score || 0;
+    donutChart.data.datasets[0].data = [d.high||0, d.medium||0, d.low||0];
+    donutChart.update();
+    if (d.recent_scores?.length) {
+      lineChart.data.labels = d.recent_scores.map((_,i) => `T-${d.recent_scores.length-i}`);
+      lineChart.data.datasets[0].data = d.recent_scores;
+      lineChart.update();
+    }
+    document.getElementById('api-status').textContent = 'API Connected';
+  } catch {
+    simulateData();
+    document.getElementById('api-status').textContent = 'Demo Mode';
+  }
+}
+
+// ── Load transactions table ─────────────────────────
+async function loadTransactions() {
+  try {
+    const r = await fetch(`${API}/transactions?limit=20&risk_level=HIGH`);
+    if (!r.ok) throw new Error();
+    const d = await r.json();
+    renderTable(d.transactions || []);
+  } catch { renderTable([]); }
+}
+
+function renderTable(rows) {
+  const tbody = document.getElementById('txn-table-body');
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">No HIGH risk transactions yet</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.transaction_id||r.txn_id||'—'}</td>
+      <td>${r.sender_upi||'—'}</td>
+      <td>₹${Number(r.amount||0).toLocaleString('en-IN')}</td>
+      <td>${r.device_type||'—'}</td>
+      <td>${r.location||'—'}</td>
+      <td style="color:${r.risk_score>=70?'#ff3d5a':r.risk_score>=40?'#ffd23f':'#3de8a0'};font-weight:700">
+        ${r.risk_score||0}
+      </td>
+      <td><span class="badge ${r.risk_level||'LOW'}">${r.risk_level||'LOW'}</span></td>
+      <td>${(r.timestamp||'').replace('T',' ').replace('Z','').slice(0,19)}</td>
+    </tr>`).join('');
+}
+
+// ── Predict ─────────────────────────────────────────
+async function predict() {
+  const body = {
+    sender_upi         : document.getElementById('f-sender').value,
+    receiver_upi       : document.getElementById('f-receiver').value,
+    amount             : parseFloat(document.getElementById('f-amount').value)||0,
+    hour_of_day        : parseInt(document.getElementById('f-hour').value)||0,
+    device_type        : document.getElementById('f-device').value,
+    location           : document.getElementById('f-location').value,
+    txn_frequency_1hr  : parseInt(document.getElementById('f-freq').value)||1,
+    is_new_receiver    : parseInt(document.getElementById('f-new').value)||0,
+    day_of_week        : new Date().getDay(),
+    vpn_used           : 0, failed_pin_attempts: 0, payment_type:'P2P'
+  };
+
+  const rb = document.getElementById('result-box');
+  rb.className = 'result-box show';
+  rb.innerHTML = '<span style="color:var(--accent)">Analysing...</span>';
+
+  try {
+    const r = await fetch(`${API}/predict`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    const lvl = d.risk_level||'LOW';
+    const cls = lvl==='HIGH'?'high':lvl==='MEDIUM'?'med':'low';
+    rb.innerHTML = `
+      <span class="r-key">transaction_id    </span><span class="r-val">${d.transaction_id}</span><br>
+      <span class="r-key">fraud_probability </span><span class="r-val">${(d.fraud_probability*100).toFixed(1)}%</span><br>
+      <span class="r-key">risk_score        </span><span class="r-val ${cls}">${d.risk_score}</span><br>
+      <span class="r-key">risk_level        </span><span class="r-val ${cls}">${lvl}</span><br>
+      <span class="r-key">alert_sent        </span><span class="r-val">${d.alert_sent}</span><br>
+      <span class="r-key">boosts            </span><span class="r-val" style="color:var(--muted)">${(d.boosts_applied||[]).join(', ')||'none'}</span>
+    `;
+    loadAll();
+  } catch(e) {
+    rb.innerHTML = `<span style="color:var(--high)">Error: ${e.message}. Is the server running?</span>`;
+  }
+}
+
+// ── Demo simulation ─────────────────────────────────
+function simulateData() {
+  const h=Math.floor(Math.random()*8+2), m=Math.floor(Math.random()*30+5),
+        l=Math.floor(Math.random()*40+15), total=h+m+l;
+  document.getElementById('c-total').textContent  = total;
+  document.getElementById('c-high').textContent   = h;
+  document.getElementById('c-medium').textContent = m;
+  const avg = Math.round((h*80+m*55+l*20)/total);
+  document.getElementById('c-avg').textContent = avg;
+  donutChart.data.datasets[0].data = [h,m,l];
+  donutChart.update();
+  const scores = Array.from({length:20},()=>Math.floor(Math.random()*90+5));
+  lineChart.data.labels = scores.map((_,i)=>`T-${20-i}`);
+  lineChart.data.datasets[0].data = scores;
+  lineChart.update();
+}
+
+function loadAll() { loadAnalytics(); loadTransactions(); }
+
+// ── Boot ─────────────────────────────────────────────
+initCharts();
+loadAll();
+setInterval(loadAll, 10000);
+</script>
+</body>
+</html>
